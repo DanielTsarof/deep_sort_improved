@@ -1,5 +1,20 @@
 # Deep SORT
 
+## About this fork
+This fork was created as a project for the deep learning for computer vision course at HSE University.
+Major changes compared to the basic repository:
+
+* Added the ability to perform detection and identification using the _yolov5_ and _osnet_ models
+(you can choose different models from these families depending on your accuracy and performance requirements).
+* Added the _deeplabv3_resnet101_ segmentation model. To start segmentation, you must pass the
+segmentation=True argument at startup. The segmentation results will be saved in the directory,
+the path to which is passed with the output_file argument in the masks folder. The results of
+detection and tracking are also saved there in a file _hyphothesses.txt_
+* To select the desired models for segmentation and detection, pass the _reid_model_ and s_egmentation_model_
+arguments at startup _deep_sort_app.py_ . Detection and tracking using these networks are carried out only
+if the _detection_file_ argument is not passed, otherwise the standard pipeline from the original repository
+will be executed.
+
 ## Introduction
 
 This repository contains code for *Simple Online and Realtime Tracking with a Deep Association Metric* (Deep SORT).
