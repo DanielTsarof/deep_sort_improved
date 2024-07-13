@@ -1,7 +1,6 @@
 import torchreid
 import torch
 from torchvision import transforms
-from PIL import Image
 
 
 class ReIDModel:

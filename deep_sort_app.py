@@ -1,4 +1,3 @@
-# deep_sort_app.py
 from __future__ import division, print_function, absolute_import
 
 import argparse
@@ -15,6 +14,7 @@ from PIL import Image
 
 from nn_models.yolov5_detect import load_yolo_model, detect_objects, xywh_to_ltwh
 from nn_models.reid_model import load_reid_model
+from nn_models.segmentation import Segmentation
 
 
 def gather_sequence_info(sequence_dir, detection_file=None):
@@ -36,6 +36,7 @@ def gather_sequence_info(sequence_dir, detection_file=None):
         * image_size: Image size (height, width).
         * min_frame_idx: Index of the first frame.
         * max_frame_idx: Index of the last frame.
+        * detection_file: path to file with detection info of None
 
     """
     image_dir = os.path.join(sequence_dir, "img1")
@@ -162,7 +163,7 @@ def create_detections(detection_mat, frame_idx, min_height=0):
 
 def run(sequence_dir, detection_file, output_file, min_confidence,
         nms_max_overlap, min_detection_height, max_cosine_distance,
-        nn_budget, display, detection_vodel, reid_model_type):
+        nn_budget, display, detection_model, reid_model_type, segmentation):
     """Run multi-target tracker on a particular sequence.
 
     Parameters
@@ -189,9 +190,39 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
         is enforced.
     display : bool
         If True, show visualization of intermediate tracking results.
+    detection_model : str
+        Type of used detection model.
+    reid_model_type : str
+        Type of used ReID model.
+    segmentation : bool
+        Flag to apply segmentation to the video.
 
     """
     seq_info = gather_sequence_info(sequence_dir, detection_file)
+    if segmentation:
+        segmenter = Segmentation()
+        mask_save_dir = os.path.join(output_file, "masks")
+        os.makedirs(mask_save_dir, exist_ok=True)
+
+        def segment_only_callback(vis, frame_idx):
+            print("Processing frame %05d for segmentation only" % frame_idx)
+
+            # Load image
+            image = cv2.imread(seq_info["image_filenames"][frame_idx], cv2.IMREAD_COLOR)
+
+            # Apply segmentation
+            mask = segmenter.segment_person(image)
+            save_path = os.path.join(mask_save_dir, f"mask_{frame_idx:05d}.png")
+            image = segmenter.overlay_mask(image, mask, (0, 0, 255))  # Red color for mask
+            cv2.imwrite(save_path, mask * 255)
+            if display:
+                vis.set_image(image.copy())
+
+        visualizer = visualization.Visualization(seq_info, update_ms=5) if display else visualization.NoVisualization(
+            seq_info)
+        visualizer.run(segment_only_callback)
+        return
+
     metric = nn_matching.NearestNeighborDistanceMetric(
         "cosine", max_cosine_distance, nn_budget)
     tracker = Tracker(metric)
@@ -199,8 +230,9 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
 
     yolo_model = None
     reid_model = None
+
     if detection_file is None:
-        yolo_model = load_yolo_model(f"nn_models/weights/yolo/{detection_vodel}.pt")
+        yolo_model = load_yolo_model(f"nn_models/weights/yolo/{detection_model}.pt")
         reid_model = load_reid_model(model_type=reid_model_type)
 
     def frame_callback(vis, frame_idx):
@@ -214,7 +246,7 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
             detections = create_detections(
                 seq_info["detections"], frame_idx, min_detection_height)
             detections = [d for d in detections if d.confidence >= min_confidence]
-#
+
         # Run non-maxima suppression.
         boxes = np.array([d.tlwh for d in detections])
         scores = np.array([d.confidence for d in detections])
@@ -248,7 +280,7 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
     visualizer.run(frame_callback)
 
     # Store results.
-    with open(output_file, 'w') as f:
+    with open(os.path.join(output_file, 'hypotheses.txt'), 'w') as f:
         for row in results:
             print('%d,%d,%.2f,%.2f,%.2f,%.2f,1,-1,-1,-1' % (
                 row[0], row[1], row[2], row[3], row[4], row[5]), file=f)
@@ -272,25 +304,25 @@ def parse_args():
         "--detection_file", help="Path to custom detections.", default=None)
     parser.add_argument(
         "--output_file", help="Path to the tracking output file. This file will"
-        " contain the tracking results on completion.",
-        default="./tmp/hypotheses.txt")
+                              " contain the tracking results on completion.",
+        default="./tmp")
     parser.add_argument(
         "--min_confidence", help="Detection confidence threshold. Disregard "
-        "all detections that have a confidence lower than this value.",
+                                 "all detections that have a confidence lower than this value.",
         default=0.8, type=float)
     parser.add_argument(
         "--min_detection_height", help="Threshold on the detection bounding "
-        "box height. Detections with height smaller than this value are "
-        "disregarded", default=0, type=int)
+                                       "box height. Detections with height smaller than this value are "
+                                       "disregarded", default=0, type=int)
     parser.add_argument(
         "--nms_max_overlap", help="Non-maxima suppression threshold: Maximum "
-        "detection overlap.", default=1.0, type=float)
+                                  "detection overlap.", default=1.0, type=float)
     parser.add_argument(
         "--max_cosine_distance", help="Gating threshold for cosine distance "
-        "metric (object appearance).", type=float, default=0.2)
+                                      "metric (object appearance).", type=float, default=0.2)
     parser.add_argument(
         "--nn_budget", help="Maximum size of the appearance descriptors "
-        "gallery. If None, no budget is enforced.", type=int, default=None)
+                            "gallery. If None, no budget is enforced.", type=int, default=None)
     parser.add_argument(
         "--display", help="Show intermediate tracking results",
         default=True, type=bool_string)
@@ -302,6 +334,9 @@ def parse_args():
         "--reid_model", help="type of used REID model: "
                              "osnet_x1_0, osnet_x0_75, osnet_x0_5, and osnet_x0_25 are allowed",
         default='osnet_x0_75', type=str)
+    parser.add_argument(
+        "--segmentation", help="flag to apply segmentation to the video",
+        default=False, type=bool_string)
     return parser.parse_args()
 
 
@@ -318,5 +353,6 @@ if __name__ == "__main__":
         args.nn_budget,
         args.display,
         args.detection_model,
-        args.reid_model
+        args.reid_model,
+        args.segmentation
     )

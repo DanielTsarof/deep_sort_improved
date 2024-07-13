@@ -1,5 +1,3 @@
-import os.path
-
 import torch
 
 
@@ -13,8 +11,6 @@ def load_yolo_model(weights_path):
     Returns:
     model: Loaded YOLOv5 model.
     """
-    import os
-    print(os.path.exists(weights_path))
     model = torch.hub.load('ultralytics/yolov5', 'custom', path=weights_path)
     model.cuda()  # Move model to GPU
     return model
