@@ -1,9 +1,8 @@
-# vim: expandtab:ts=4:sw=4
+# deep_sort_app.py
 from __future__ import division, print_function, absolute_import
 
 import argparse
 import os
-
 import cv2
 import numpy as np
 
@@ -12,18 +11,19 @@ from application_util import visualization
 from deep_sort import nn_matching
 from deep_sort.detection import Detection
 from deep_sort.tracker import Tracker
+from PIL import Image
+
+from nn_models.yolov5_detect import load_yolo_model, detect_objects, xywh_to_ltwh
+from nn_models.reid_model import load_reid_model
 
 
-def gather_sequence_info(sequence_dir, detection_file):
-    """Gather sequence information, such as image filenames, detections,
-    groundtruth (if available).
+def gather_sequence_info(sequence_dir, detection_file=None):
+    """Gather sequence information, such as image filenames and groundtruth (if available).
 
     Parameters
     ----------
     sequence_dir : str
         Path to the MOTChallenge sequence directory.
-    detection_file : str
-        Path to the detection file.
 
     Returns
     -------
@@ -31,9 +31,7 @@ def gather_sequence_info(sequence_dir, detection_file):
         A dictionary of the following sequence information:
 
         * sequence_name: Name of the sequence
-        * image_filenames: A dictionary that maps frame indices to image
-          filenames.
-        * detections: A numpy array of detections in MOTChallenge format.
+        * image_filenames: A dictionary that maps frame indices to image filenames.
         * groundtruth: A numpy array of ground truth in MOTChallenge format.
         * image_size: Image size (height, width).
         * min_frame_idx: Index of the first frame.
@@ -63,7 +61,8 @@ def gather_sequence_info(sequence_dir, detection_file):
     if len(image_filenames) > 0:
         min_frame_idx = min(image_filenames.keys())
         max_frame_idx = max(image_filenames.keys())
-    else:
+
+    if detections is not None:
         min_frame_idx = int(detections[:, 0].min())
         max_frame_idx = int(detections[:, 0].max())
 
@@ -91,6 +90,41 @@ def gather_sequence_info(sequence_dir, detection_file):
         "update_ms": update_ms
     }
     return seq_info
+
+
+def create_detections_yolo(yolo_model, reid_model, img, min_confidence):
+    """Create detections for a given image using YOLO and ReID model.
+
+    Parameters
+    ----------
+    yolo_model : YOLOv5 model
+        The YOLOv5 model for detection.
+    reid_model : ReID model
+        The ReID model for feature extraction.
+    img : numpy.ndarray
+        Image array.
+    min_confidence : float
+        Minimum confidence threshold for detections.
+
+    Returns
+    -------
+    List[tracker.Detection]
+        Returns detection responses for the given image.
+    """
+    results = detect_objects(yolo_model, img)
+    detections = []
+
+    for *xywh, conf, cls in results.xywh[0].cpu().numpy():
+        if int(cls) == 0 and conf >= min_confidence:  # Filter for 'person' class
+            ltwh = xywh_to_ltwh(xywh)
+            if ltwh[2] > 0 and ltwh[3] > 0:  # Ensure valid bounding box
+                x1, y1, w, h = ltwh
+                bbox_img = img[y1:y1 + h, x1:x1 + w]
+                if bbox_img.size > 0:
+                    bbox_pil = Image.fromarray(cv2.cvtColor(bbox_img, cv2.COLOR_BGR2RGB))
+                    features = reid_model.extract_features(bbox_pil).numpy().flatten()
+                    detections.append(Detection(ltwh, conf, features))
+    return detections
 
 
 def create_detections(detection_mat, frame_idx, min_height=0):
@@ -128,7 +162,7 @@ def create_detections(detection_mat, frame_idx, min_height=0):
 
 def run(sequence_dir, detection_file, output_file, min_confidence,
         nms_max_overlap, min_detection_height, max_cosine_distance,
-        nn_budget, display):
+        nn_budget, display, detection_vodel, reid_model_type):
     """Run multi-target tracker on a particular sequence.
 
     Parameters
@@ -163,14 +197,24 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
     tracker = Tracker(metric)
     results = []
 
+    yolo_model = None
+    reid_model = None
+    if detection_file is None:
+        yolo_model = load_yolo_model(f"nn_models/weights/yolo/{detection_vodel}.pt")
+        reid_model = load_reid_model(model_type=reid_model_type)
+
     def frame_callback(vis, frame_idx):
         print("Processing frame %05d" % frame_idx)
 
         # Load image and generate detections.
-        detections = create_detections(
-            seq_info["detections"], frame_idx, min_detection_height)
-        detections = [d for d in detections if d.confidence >= min_confidence]
-
+        image = cv2.imread(seq_info["image_filenames"][frame_idx], cv2.IMREAD_COLOR)
+        if detection_file is None:
+            detections = create_detections_yolo(yolo_model, reid_model, image, min_confidence)
+        else:
+            detections = create_detections(
+                seq_info["detections"], frame_idx, min_detection_height)
+            detections = [d for d in detections if d.confidence >= min_confidence]
+#
         # Run non-maxima suppression.
         boxes = np.array([d.tlwh for d in detections])
         scores = np.array([d.confidence for d in detections])
@@ -184,8 +228,6 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
 
         # Update visualization.
         if display:
-            image = cv2.imread(
-                seq_info["image_filenames"][frame_idx], cv2.IMREAD_COLOR)
             vis.set_image(image.copy())
             vis.draw_detections(detections)
             vis.draw_trackers(tracker.tracks)
@@ -206,17 +248,18 @@ def run(sequence_dir, detection_file, output_file, min_confidence,
     visualizer.run(frame_callback)
 
     # Store results.
-    f = open(output_file, 'w')
-    for row in results:
-        print('%d,%d,%.2f,%.2f,%.2f,%.2f,1,-1,-1,-1' % (
-            row[0], row[1], row[2], row[3], row[4], row[5]),file=f)
+    with open(output_file, 'w') as f:
+        for row in results:
+            print('%d,%d,%.2f,%.2f,%.2f,%.2f,1,-1,-1,-1' % (
+                row[0], row[1], row[2], row[3], row[4], row[5]), file=f)
 
 
 def bool_string(input_string):
-    if input_string not in {"True","False"}:
-        raise ValueError("Please Enter a valid Ture/False choice")
+    if input_string not in {"True", "False"}:
+        raise ValueError("Please Enter a valid True/False choice")
     else:
-        return (input_string == "True")
+        return input_string == "True"
+
 
 def parse_args():
     """ Parse command line arguments.
@@ -226,12 +269,11 @@ def parse_args():
         "--sequence_dir", help="Path to MOTChallenge sequence directory",
         default=None, required=True)
     parser.add_argument(
-        "--detection_file", help="Path to custom detections.", default=None,
-        required=True)
+        "--detection_file", help="Path to custom detections.", default=None)
     parser.add_argument(
         "--output_file", help="Path to the tracking output file. This file will"
         " contain the tracking results on completion.",
-        default="/tmp/hypotheses.txt")
+        default="./tmp/hypotheses.txt")
     parser.add_argument(
         "--min_confidence", help="Detection confidence threshold. Disregard "
         "all detections that have a confidence lower than this value.",
@@ -241,7 +283,7 @@ def parse_args():
         "box height. Detections with height smaller than this value are "
         "disregarded", default=0, type=int)
     parser.add_argument(
-        "--nms_max_overlap",  help="Non-maxima suppression threshold: Maximum "
+        "--nms_max_overlap", help="Non-maxima suppression threshold: Maximum "
         "detection overlap.", default=1.0, type=float)
     parser.add_argument(
         "--max_cosine_distance", help="Gating threshold for cosine distance "
@@ -252,12 +294,29 @@ def parse_args():
     parser.add_argument(
         "--display", help="Show intermediate tracking results",
         default=True, type=bool_string)
+    parser.add_argument(
+        "--detection_model", help="type of used detection model:"
+                                  " yolov5n, yolov5s, yolov5m and yolov5l are allowed",
+        default='yolov5n', type=str)
+    parser.add_argument(
+        "--reid_model", help="type of used REID model: "
+                             "osnet_x1_0, osnet_x0_75, osnet_x0_5, and osnet_x0_25 are allowed",
+        default='osnet_x0_75', type=str)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     run(
-        args.sequence_dir, args.detection_file, args.output_file,
-        args.min_confidence, args.nms_max_overlap, args.min_detection_height,
-        args.max_cosine_distance, args.nn_budget, args.display)
+        args.sequence_dir,
+        args.detection_file,
+        args.output_file,
+        args.min_confidence,
+        args.nms_max_overlap,
+        args.min_detection_height,
+        args.max_cosine_distance,
+        args.nn_budget,
+        args.display,
+        args.detection_model,
+        args.reid_model
+    )

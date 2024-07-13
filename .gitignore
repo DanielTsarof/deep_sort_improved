@@ -87,3 +87,8 @@ ENV/
 
 # Rope project settings
 .ropeproject
+data/
+tmp/*.txt
+test.py
+tmp.py
+nn_models/weights/yolo/*pt
