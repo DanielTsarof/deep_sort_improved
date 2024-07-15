@@ -333,7 +333,7 @@ def parse_args():
     parser.add_argument(
         "--reid_model", help="type of used REID model: "
                              "osnet_x1_0, osnet_x0_75, osnet_x0_5, and osnet_x0_25 are allowed",
-        default='osnet_x0_75', type=str)
+        default='osnet_x0_25', type=str)
     parser.add_argument(
         "--segmentation", help="flag to apply segmentation to the video",
         default=False, type=bool_string)
